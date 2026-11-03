@@ -158,7 +158,7 @@ internal static class OverlayPresentationBuilder
             DisplayField.ContextPercent => "上下文百分比",
             DisplayField.Reasoning => "推理输出",
             DisplayField.Thread => "会话 ID",
-            DisplayField.Tps => "输出速度 TPS",
+            DisplayField.Tps => "估算输出速度 TPS",
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "不支持的展示字段。")
         };
     }
@@ -252,7 +252,7 @@ internal static class OverlayPresentationBuilder
             DisplayField.ContextPercent => ("上下文", "上下文占用"),
             DisplayField.Reasoning => ("推理", "推理输出"),
             DisplayField.Thread => ("会话", "会话"),
-            DisplayField.Tps => ("⚡", "输出速度"),
+            DisplayField.Tps => ("⚡", "估算输出速度"),
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "不支持的展示字段。")
         };
     }

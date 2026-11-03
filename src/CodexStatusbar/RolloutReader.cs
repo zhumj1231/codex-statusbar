@@ -39,7 +39,7 @@ internal sealed class RolloutReader
 
     public string Path { get; }
 
-    public RolloutStreamState State { get; }
+    public RolloutStreamState State { get; private set; }
 
     /// <summary>Byte offset of the end of the last successfully parsed complete line.</summary>
     public long Offset { get; private set; }
@@ -181,7 +181,7 @@ internal sealed class RolloutReader
         }
 
         var length = SafeLength(stream);
-        if (length < Offset)
+        if (length < Offset + _pending.Length)
         {
             // Size shrank: the file was truncated or replaced. A fresh tail read is the only safe move.
             return RolloutUpdateResult.NeedsReinitialize;
@@ -195,7 +195,7 @@ internal sealed class RolloutReader
         }
 
         var appended = length - Offset;
-        if (appended <= 0)
+        if (appended <= _pending.Length)
         {
             return RolloutUpdateResult.Unchanged;
         }
@@ -215,18 +215,7 @@ internal sealed class RolloutReader
 
     private void ResetState()
     {
-        State.InputTokens = 0;
-        State.CachedInputTokens = 0;
-        State.OutputTokens = 0;
-        State.ReasoningOutputTokens = 0;
-        State.TotalTokens = 0;
-        State.ContextUsedTokens = 0;
-        State.ContextWindowTokens = 0;
-        State.HasCumulativeUsage = false;
-        State.HasRolloutUsage = false;
-        State.CurrentTurnId = null;
-        State.Warnings.Clear();
-        State.LineCount = 0;
+        State = new RolloutStreamState();
         _pending = [];
         Offset = 0;
         ParsedBytes = 0;
@@ -239,7 +228,8 @@ internal sealed class RolloutReader
     /// </summary>
     private void ConsumeCompleteLines(byte[] bytes)
     {
-        var buffer = _pending.Length == 0 ? bytes : Concat(_pending, bytes);
+        // Reads resume at Offset, so bytes already includes the previous unfinished tail.
+        var buffer = bytes;
         if (buffer.Length == 0)
         {
             _pending = [];
@@ -273,11 +263,17 @@ internal sealed class RolloutReader
         var text = Encoding.UTF8.GetString(tail).Trim();
         if (text.Length > 0 && text.StartsWith('{') && text.EndsWith('}'))
         {
-            // A complete record whose trailing newline has not been flushed yet. A genuinely
-            // half-written line never parses, so it stays pending for the next read.
-            State.ObserveLine(text);
-            _pending = [];
-            return;
+            try
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(text);
+                State.ObserveLine(text);
+                _pending = [];
+                return;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // A partial JSON string can end in '}' without ending the record.
+            }
         }
 
         if (tail.Length > TpsRules.TailReadBytes)
@@ -409,11 +405,4 @@ internal sealed class RolloutReader
         return offset == count ? buffer : buffer[..offset];
     }
 
-    private static byte[] Concat(byte[] first, byte[] second)
-    {
-        var result = new byte[first.Length + second.Length];
-        first.CopyTo(result, 0);
-        second.CopyTo(result, first.Length);
-        return result;
-    }
 }

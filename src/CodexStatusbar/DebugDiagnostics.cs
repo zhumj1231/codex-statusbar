@@ -540,6 +540,9 @@ internal sealed class DebugDiagnostics
             "Merged model elapsed ms:",
             snapshot.MergedModelElapsedMs.ToString(CultureInfo.InvariantCulture));
         Append(builder, "Turn output tokens:", snapshot.TurnOutputTokens.ToString(CultureInfo.InvariantCulture));
+        Append(builder, "Measured output tokens:", snapshot.MeasuredOutputTokens.ToString(CultureInfo.InvariantCulture));
+        Append(builder, "Measured response ms:", snapshot.MeasuredGenerationMs.ToString(CultureInfo.InvariantCulture));
+        Append(builder, "Untimed responses:", snapshot.UntimedResponses.ToString(CultureInfo.InvariantCulture));
         Append(
             builder,
             "Model intervals:",
@@ -548,7 +551,7 @@ internal sealed class DebugDiagnostics
                 : "none");
         Append(builder, "First item start:", FormatTimestamp(snapshot.FirstItemStartMs));
         Append(builder, "Last item end:", FormatTimestamp(snapshot.LastItemEndMs));
-        Append(builder, "Current realtime TPS:", MetricFormat.FormatTpsFloat(snapshot.Tps));
+        Append(builder, "Response TPS estimate:", MetricFormat.FormatTpsFloat(snapshot.Tps));
         Append(builder, "Last completed TPS:", MetricFormat.FormatTpsFloat(snapshot.LastTurnTps));
         Append(
             builder,

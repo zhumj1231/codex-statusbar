@@ -62,6 +62,10 @@ internal static class SelfTest
         Section("deduplication: the same usage must never be counted twice");
         RunDeduplication(stdout);
 
+        Section("usage scopes and completed-response timing");
+        RunUsageTimingRegression();
+        RunIncrementalUsageRegression();
+
         Section("TPS denominator: union of model windows, tool time excluded");
         RunIntervalUnion(stdout);
 
@@ -672,6 +676,154 @@ internal static class SelfTest
         midTurn.ObserveLine(UsageRecord(1_000, 900, 400));
         Check("turn observed only mid-flight -> TPS unknown", midTurn.Tps.DisplayTps is null, true);
         Check("... and the denominator is flagged incomplete", midTurn.Tps.TurnItemsComplete, false);
+    }
+
+    private static void RunUsageTimingRegression()
+    {
+        // Reduced from a real dual-carrier sequence; identifiers and clock origins are synthetic.
+        var state = new RolloutStreamState();
+        state.ObserveLine(TokenCount(6_366_729, 5_537_280, 12_781));
+        state.ObserveLine(TaskStarted("scope"));
+        state.ObserveLine(ItemCompleted("scope", "AgentMessage", 1_000, 2_828));
+        state.ObserveLine("{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\"}}");
+        var first = TimedUsage("scope", "r1", 3_579, 11_837_729, 10_637_696, 35_978, 63_610, 124);
+        state.ObserveLine(first);
+        Check("source promotion does not count the historical output gap", state.Tps.TurnOutputTokens, 124L);
+        Check("tool argument generation is part of response time", state.Tps.MeasuredGenerationMs, 2_579L);
+        Check("first response uses matching tokens and time", state.Tps.RawLastSample, 124_000d / 2_579, 1e-9);
+        var measured = state.Tps.DisplayTps ?? double.NaN;
+        state.ObserveLine(LegacyUsage(6_430_339, 5_600_768, 12_905, 63_610, 124));
+        Check("lower legacy total cannot rewind the thread total", state.TotalTokens, 11_873_707L);
+        Check("legacy cache uses no mixed denominator", state.CachedInputTokens, 10_637_696L);
+        Check("modern source remains selected", state.Carrier, "token_usage_record");
+        Check("legacy duplicate does not change the speed", state.Tps.DisplayTps, measured, 1e-9);
+        Check("legacy duplicate does not add an EMA sample", state.Tps.SampleCount, 1);
+
+        state.ObserveLine(ItemCompleted("scope", "Reasoning", 10_000, 11_000));
+        Check("new item time never divides old output tokens", state.Tps.DisplayTps, measured, 1e-9);
+        Check("pending model activity holds the last sample", state.Tps.IsHeld, true);
+        var second = TimedUsage("scope", "r2", 12_000, 11_901_339, 10_701_184, 36_102, 63_610, 124);
+        state.ObserveLine(second);
+        state.ObserveLine(second);
+        state.ObserveLine(first);
+        Check("equal-sized responses with different IDs both count", state.Tps.TurnOutputTokens, 248L);
+        Check("duplicates and stale records add no timing samples", state.Tps.SampleCount, 2);
+        Check("a stale modern record cannot rewind the total", state.TotalTokens, 11_937_441L);
+        Check("second response has its own rate", state.Tps.RawLastSample, 62d, 1e-9);
+        state.ObserveLine(ItemCompleted("scope", "ContextCompaction", 12_000, 20_000));
+        Check("compaction is a known non-output item", state.Warnings.Contains("item:ContextCompaction"), false);
+        state.ObserveLine(TaskComplete("scope"));
+        Check("turn average is token-weighted, not the final EMA", state.Tps.LastTurnTps, 248_000d / 4_579, 1e-9);
+
+        var untimed = new RolloutStreamState();
+        untimed.ObserveLine(TaskStarted("timing"));
+        untimed.ObserveLine(ItemCompleted("timing", "Reasoning", 1_000, 2_000));
+        untimed.ObserveLine(TimedUsage("timing", "a", 3_000, 1_000, 800, 200, 1_000, 200));
+        untimed.ObserveLine(TimedUsage("timing", "b", 8_000, 2_000, 1_600, 5_200, 1_000, 5_000));
+        Check("untimed output is retained in conversation/turn counts", untimed.Tps.TurnOutputTokens, 5_200L);
+        Check("untimed output cannot inflate the measured numerator", untimed.Tps.MeasuredOutputTokens, 200L);
+        Check("untimed response keeps the last measured speed", untimed.Tps.DisplayTps, 100d, 1e-9);
+        Check("untimed response is explicitly counted", untimed.Tps.UntimedResponses, 1);
+        Check("untimed response is displayed as held", untimed.Tps.IsHeld, true);
+        untimed.ObserveLine(ItemCompleted("timing", "AgentMessage", 7_000, 7_900));
+        untimed.ObserveLine(TimedUsage("timing", "c", 9_000, 3_000, 2_400, 5_300, 1_000, 100));
+        Check("late timing from an old response cannot time a new one", untimed.Tps.SampleCount, 1);
+        untimed.ObserveLine(TaskComplete("timing"));
+        Check("partial turn average is still marked as held", untimed.Tps.IsHeld, true);
+        Check("partial turn average excludes untimed output", untimed.Tps.LastTurnTps, 100d, 1e-9);
+
+        var legacy = new RolloutStreamState();
+        legacy.ObserveLine(TaskStarted("legacy"));
+        legacy.ObserveLine(ItemCompleted("legacy", "AgentMessage", 0, 1_000));
+        legacy.ObserveLine(LegacyUsage(1_000, 800, 100, 1_000, 100));
+        legacy.ObserveLine(ItemCompleted("legacy", "AgentMessage", 2_000, 3_000));
+        legacy.ObserveLine(LegacyUsage(2_000, 1_600, 200, 1_000, 100));
+        legacy.ObserveLine(LegacyUsage(2_000, 1_600, 200, 1_000, 100));
+        Check("legacy equal-sized responses use cumulative identities", legacy.Tps.TurnOutputTokens, 200L);
+        Check("legacy duplicate does not add a sample", legacy.Tps.SampleCount, 2);
+        legacy.ObserveLine(ItemCompleted("legacy", "Reasoning", 4_000, 4_100));
+        legacy.ObserveLine("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"}}");
+        legacy.ObserveLine(LegacyUsage(3_000, 2_400, 500, 1_000, 300));
+        Check("legacy tool calls without response end times are not measured", legacy.Tps.SampleCount, 2);
+        Check("legacy tool calls do not use reasoning-only time", legacy.Tps.DisplayTps, 100d, 1e-9);
+
+        var wrongTurn = TimedUsage("old-turn", "old", 50_000, 99_000, 80_000, 9_000, 1_000, 900);
+        legacy.ObserveLine(wrongTurn);
+        Check("late usage does not replace the active turn", legacy.CurrentTurnId, "legacy");
+        legacy.ObserveLine(ItemCompleted("old-turn", "AgentMessage", 40_000, 45_000));
+        legacy.ObserveLine(TaskComplete("old-turn"));
+        Check("late items and completion do not replace the active turn", legacy.CurrentTurnId, "legacy");
+        Check("late completion cannot stop the active turn", legacy.Tps.Streaming, true);
+
+        var missingStart = new RolloutStreamState();
+        missingStart.ObserveLine(TaskStarted("none"));
+        missingStart.ObserveLine(TimedUsage("none", "n", 1_000, 1_000, 800, 100, 1_000, 100));
+        Check("no model start means unknown speed", missingStart.Tps.DisplayTps is null, true);
+    }
+
+    private static string TimedUsage(string turn, string response, long end, long input, long cached,
+        long output, long responseInput, long responseOutput) => JsonSerializer.Serialize(new
+        {
+            timestamp = DateTimeOffset.FromUnixTimeMilliseconds(end).ToString("O"),
+            type = "token_usage_record",
+            payload = new
+            {
+                turn_id = turn,
+                response_id = response,
+                usage = JsonSerializer.Deserialize<JsonElement>(UsageBody(responseInput, 0, responseOutput)),
+                thread_token_usage = JsonSerializer.Deserialize<JsonElement>(UsageBody(input, cached, output))
+            }
+        });
+
+    private static string LegacyUsage(long input, long cached, long output, long responseInput, long responseOutput) =>
+        $"{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{UsageBody(input, cached, output)},\"last_token_usage\":{UsageBody(responseInput, 0, responseOutput)}}}}}}}";
+
+    private static void RunIncrementalUsageRegression()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "codex-statusbar-usage-" + Guid.NewGuid().ToString("N") + ".jsonl");
+        try
+        {
+            var header = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"partial\"}}\n";
+            var record = TimedUsage("partial", "r1", 3_000, 1_000, 800, 200, 1_000, 200);
+            var split = record.Length / 2;
+            File.WriteAllText(path, header + TaskStarted("partial") + "\n"
+                + ItemCompleted("partial", "AgentMessage", 1_000, 2_000) + "\n" + record[..split]);
+            var reader = new RolloutReader(path);
+            reader.Initialize();
+            Check("partial write has no fabricated usage", reader.State.TotalTokens, 0L);
+            Check("an unchanged partial tail is not reread",
+                reader.TryUpdate() == RolloutUpdateResult.Unchanged, true);
+            File.AppendAllText(path, record[split..] + "\n");
+            reader.TryUpdate();
+            Check("split JSON record is parsed exactly once", reader.State.TotalTokens, 1_200L);
+            Check("split JSON record yields the matched response rate", reader.State.Tps.DisplayTps, 100d, 1e-9);
+            Check("pending bytes are not duplicated into malformed JSON", reader.State.Warnings.Contains("malformed-json"), false);
+            File.AppendAllText(path, LegacyUsage(500, 400, 100, 1_000, 200) + "\n");
+            reader.TryUpdate();
+            Check("appended legacy snapshot cannot rewind modern totals", reader.State.TotalTokens, 1_200L);
+            reader.Initialize();
+            Check("reinitialization reproduces the same selected source", reader.State.TotalTokens, 1_200L);
+            Check("reinitialization reproduces the same response rate", reader.State.Tps.DisplayTps, 100d, 1e-9);
+
+            File.WriteAllText(path, header + TokenCount(500, 400, 100) + "\n");
+            Check("truncation requests a clean reinitialization",
+                reader.TryUpdate() == RolloutUpdateResult.NeedsReinitialize, true);
+            reader.Initialize();
+            Check("a new legacy-only file does not inherit modern-source preference", reader.State.Carrier, "token_count");
+            Check("a replacement file has its own totals", reader.State.TotalTokens, 600L);
+
+            File.WriteAllText(path, header + "{\"type\":\"response_item\",\"payload\":{\"text\":\"literal }");
+            reader.Initialize();
+            Check("a brace inside an unfinished string stays pending", reader.State.Warnings.Count, 0);
+            File.AppendAllText(path, "\"}}\n" + TokenCount(700, 500, 200) + "\n");
+            reader.TryUpdate();
+            Check("a completed string does not corrupt following usage", reader.State.TotalTokens, 900L);
+            Check("a completed partial string parses without warnings", reader.State.Warnings.Count, 0);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     // ----------------------------------------------------------- state machine
