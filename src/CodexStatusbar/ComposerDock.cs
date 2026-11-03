@@ -107,9 +107,6 @@ internal sealed class ComposerDockTracker : IDisposable
         "上下文用量", "Context usage", "Context window", "context window"
     };
 
-    /// <summary>Design-system class fragment on the Context indicator, a text-independent signal.</summary>
-    private const string ContextClassHint = "codex-description";
-
     /// <summary>
     /// How often the fast path (re-reading the held element) runs when nothing is moving. This is the
     /// accurate path's own cadence and is unchanged from the original design.
@@ -298,6 +295,7 @@ internal sealed class ComposerDockTracker : IDisposable
         AutomationElement? reference = null;
         AutomationElement? model = null;
         var lastReferenceRect = default(IntRect);
+        var lastModelRect = default(IntRect);
         var walksRemaining = 2;
         var lastWalkAt = DateTime.UtcNow;
 
@@ -373,6 +371,13 @@ internal sealed class ComposerDockTracker : IDisposable
                     walksRemaining = 2;
                 }
 
+                // A model-label change can move the toolbar without moving the window.
+                if (model is not null && (!TryReadRect(model, out var currentModelRect)
+                    || (WalkOnReferenceMove && currentModelRect != lastModelRect)))
+                {
+                    walksRemaining = 2;
+                }
+
                 if (DateTime.UtcNow - lastWalkAt > ResyncInterval)
                 {
                     walksRemaining = 2;
@@ -388,6 +393,7 @@ internal sealed class ComposerDockTracker : IDisposable
                     lastWalkAt = DateTime.UtcNow;
                     walksRemaining--;
                     lastReferenceRect = snapshot.ReferenceRect;
+                    lastModelRect = model is null ? default : snapshot.RowRect;
                     Publish(snapshot);
                 }
                 else if (!fastRect.IsEmpty)
@@ -542,20 +548,7 @@ internal sealed class ComposerDockTracker : IDisposable
 
         var contextIndex = -1;
         AutomationElement? contextElement = null;
-        for (var i = 0; i < children.Count; i++)
-        {
-            if (children[i].ControlType != "Image")
-            {
-                continue;
-            }
-
-            contextIndex = i;
-            contextElement = children[i].Element;
-            break;
-        }
-
-        // Prefer the element whose label looks like the Context indicator; among Images there is
-        // normally exactly one, but if Codex adds a second icon the label decides.
+        // An arbitrary image or shared text-colour class is not a Context indicator.
         for (var i = 0; i < children.Count; i++)
         {
             var candidate = children[i];
@@ -564,7 +557,7 @@ internal sealed class ComposerDockTracker : IDisposable
                 continue;
             }
 
-            if (LooksLikeContextUsage(candidate.Name, candidate.ClassName))
+            if (LooksLikeContextUsage(candidate.Name))
             {
                 contextIndex = i;
                 contextElement = candidate.Element;
@@ -594,7 +587,7 @@ internal sealed class ComposerDockTracker : IDisposable
                 continue;
             }
 
-            if (!contextRect.IsEmpty && buttonRect.Left < contextRect.Left)
+            if (!IsModelReference(buttonRect, composerRect, contextRect))
             {
                 continue;   // the permission button, which also expands
             }
@@ -625,7 +618,8 @@ internal sealed class ComposerDockTracker : IDisposable
 
         foreach (var candidate in children)
         {
-            if (contextIndex >= 0 && candidate.Index >= contextIndex)
+            var rightBoundary = contextRect.IsEmpty ? modelRect.Left : contextRect.Left;
+            if (candidate.Rect.Right > rightBoundary)
             {
                 continue;
             }
@@ -719,7 +713,7 @@ internal sealed class ComposerDockTracker : IDisposable
         string AutomationId,
         string ClassName);
 
-    private static bool LooksLikeContextUsage(string name, string className)
+    internal static bool LooksLikeContextUsage(string name)
     {
         foreach (var hint in ContextNameHints)
         {
@@ -729,8 +723,14 @@ internal sealed class ComposerDockTracker : IDisposable
             }
         }
 
-        return className.Contains(ContextClassHint, StringComparison.OrdinalIgnoreCase);
+        return false;
     }
+
+    internal static bool IsModelReference(IntRect button, IntRect composer, IntRect context) =>
+        !button.IsEmpty && button.Left >= composer.Left + composer.Width / 2
+        && button.Bottom <= composer.Bottom && button.Top >= composer.Top + composer.Height / 2
+        && (context.IsEmpty || (button.Left >= context.Right
+            && button.Bottom > context.Top && button.Top < context.Bottom));
 
     /// <summary>
     /// The composer card: the ControlView parent of the ProseMirror contenteditable. The card has no

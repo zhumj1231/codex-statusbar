@@ -1908,10 +1908,8 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         // longer is what would print the full strip over the permission chip, so a level is only ever
         // raised once the reference rectangle has stopped moving.
         var referenceMoved = dock.ReferenceRect != _lastDockReferenceRect;
-        if (referenceMoved && chosen > _responsiveLevel)
-        {
-            chosen = _responsiveLevel;
-        }
+        chosen = OverlayLayoutCalculator.StabilizeVariant(
+            chosen, _responsiveLevel < widths.Length ? _responsiveLevel : -1, referenceMoved);
 
         _lastDockReferenceRect = dock.ReferenceRect;
 
@@ -1925,6 +1923,10 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
     /// <summary>The width budget for the strip, in DIP: from the reference leftwards to the composer's own buttons.</summary>
     private double AvailableStripWidthDip(CodexWindowTarget target, ComposerDockSnapshot dock)
     {
+        if (!dock.HasReference)
+        {
+            return 0;
+        }
         var dpi = target.HostWindow.Dpi;
         var visibleHost = OverlayLayoutCalculator.ResolveVisibleHost(target.HostWindow);
         var referenceLeft = OverlayLayoutCalculator.ResolveReferenceLeft(dock, visibleHost, dpi);

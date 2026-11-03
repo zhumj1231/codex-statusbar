@@ -1,8 +1,8 @@
 # CodexStatusbar
 
-> Local build **1.0.0-rc3.usage-fix1** changes usage-source selection, response timing and partial-line
-> reading. Its metric definitions supersede sections 1–2 below; see [the fix notes](docs/usage-timing-fix.md).
-> The upstream release binary linked below does not contain this local fix.
+> Fork build **1.0.0-rc3.usage-fix2** includes the [usage/timing fix](docs/usage-timing-fix.md)
+> and [safe docking without the lightning icon](docs/layout-fix.md). These notes supersede the
+> corresponding upstream descriptions below. [Download and install](docs/laptop-install-handoff.zh-CN.md).
 
 <https://github.com/dongyue-19/codex-statusbar> · MIT licensed · **v1.0.0-rc3** (release candidate,
 feature-frozen)

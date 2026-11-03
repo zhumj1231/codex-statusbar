@@ -267,9 +267,7 @@ internal static class SelfTest
         foreach (var (label, dock, expectedRight) in new[]
         {
             ("uia-context", context, 1708 - 15),
-            ("uia-model", modelOnly, 1738 - 30 - 15),
-            ("uia-composer", composerOnly, 2100 - 392 - 15),
-            ("window-fallback", windowOnly, 2356 - 648 - 15)
+            ("uia-model", modelOnly, 1738 - 30 - 15)
         })
         {
             var layout = OverlayLayoutCalculator.Calculate(new OverlayLayoutRequest(
@@ -349,9 +347,9 @@ internal static class SelfTest
         var variants = OverlayPresentationBuilder.BuildCapsuleVariants(
             "192", "2.4M", "95%", hasUsage: true);
         Check("four verbosity levels", variants.Count, 4L);
-        Check("level 0 is the full strip", variants[0], "⚡ 192 tok/s · 2.4M tok · Cache 95%");
-        Check("level 1 drops the unit words", variants[1], "⚡ 192 t/s · 2.4M · 95%");
-        Check("level 2 drops the glyph as well", variants[2], "192 t/s · 2.4M · 95%");
+        Check("level 0 is the full strip", variants[0], "192 tok/s · 2.4M tok · Cache 95%");
+        Check("level 1 drops the unit words", variants[1], "192 tok/s · 2.4M · 95%");
+        Check("level 2 shortens the speed unit", variants[2], "192 t/s · 2.4M · 95%");
         Check("level 3 keeps the two unit-free quantities", variants[3], "2.4M · 95%");
         for (var index = 1; index < variants.Count; index++)
         {
@@ -362,7 +360,7 @@ internal static class SelfTest
         }
 
         var waiting = OverlayPresentationBuilder.BuildCapsuleVariants("--", "--", "--", hasUsage: false);
-        Check("before any usage every number is --", waiting[0], "⚡ -- tok/s · -- tok · Cache --");
+        Check("before any usage every number is --", waiting[0], "-- tok/s · -- tok · Cache --");
         Check("the cache is never rendered as 0% when input is zero", waiting[3], "-- · --");
 
         // ---- the glyph split -------------------------------------------------------
@@ -372,6 +370,47 @@ internal static class SelfTest
         var noIcon = TokenStripForm.SplitLeadingIcon("2.4M · 95%");
         Check("a line without the glyph is untouched", noIcon.Icon.Length, 0L);
         Check("and keeps its text", noIcon.Body, "2.4M · 95%");
+
+        Check("live and waiting variants do not imply Fast mode",
+            variants.Concat(waiting).Any(text => text.Contains('⚡')), false);
+        Check("an unlabeled image is not a context indicator", ComposerDockTracker.LooksLikeContextUsage(""), false);
+        Check("Fast mode is not a context indicator", ComposerDockTracker.LooksLikeContextUsage("Fast"), false);
+        Check("English context indicator is recognized", ComposerDockTracker.LooksLikeContextUsage("Context usage: 13%"), true);
+        Check("Chinese context indicator is recognized", ComposerDockTracker.LooksLikeContextUsage("上下文用量：13%"), true);
+        Check("permission menu cannot substitute for a model selector",
+            ComposerDockTracker.IsModelReference(new IntRect(1030, 1385, 155, 42), context.ComposerRect, default), false);
+        Check("the actual model menu is a usable fallback",
+            ComposerDockTracker.IsModelReference(context.RowRect, context.ComposerRect, context.ReferenceRect), true);
+        Check("a narrowing toolbar shortens immediately",
+            OverlayLayoutCalculator.StabilizeVariant(2, 0, true), 2L);
+        Check("expansion waits until the reference settles",
+            OverlayLayoutCalculator.StabilizeVariant(0, 2, true), 2L);
+        Check("a settled toolbar can expand",
+            OverlayLayoutCalculator.StabilizeVariant(0, 2, false), 0L);
+        Check("no fitting variant hides even during movement",
+            OverlayLayoutCalculator.StabilizeVariant(-1, 0, true), -1L);
+        Check("recovery from hidden state uses an actual variant",
+            OverlayLayoutCalculator.StabilizeVariant(0, -1, true), 0L);
+
+        var request = new OverlayLayoutRequest(host, AnchorMode.TitleBarTopRight, false, 0, false,
+            CapsuleSize: size, Dock: context);
+        foreach (var degraded in new[] { composerOnly, windowOnly })
+        {
+            Check("unmeasured toolbar geometry is hidden",
+                OverlayLayoutCalculator.Calculate(request with { Dock = degraded }).State,
+                OverlayVisualState.HiddenForSpace);
+        }
+        var crowded = context with { LeftClusterRect = new IntRect(995, 1385, 670, 42) };
+        Check("insufficient space never pushes the strip into the model selector",
+            OverlayLayoutCalculator.Calculate(request with { Dock = crowded }).State,
+            OverlayVisualState.HiddenForSpace);
+        var wrongImage = context with { ReferenceRect = new IntRect(2030, 1396, 25, 25) };
+        Check("a reference to the right cannot cross the measured model boundary",
+            OverlayLayoutCalculator.Calculate(request with { Dock = wrongImage }).WindowBounds.Right <= context.RowRect.Left - 15, true);
+        var clippedHost = host with { WorkingArea = new IntRect(1650, 0, 910, 1528) };
+        Check("screen clamping cannot move the strip onto the model selector",
+            OverlayLayoutCalculator.Calculate(request with { HostWindow = clippedHost }).State,
+            OverlayVisualState.HiddenForSpace);
     }
 
     /// <summary>Enum-valued check; reports the names rather than the underlying numbers.</summary>
