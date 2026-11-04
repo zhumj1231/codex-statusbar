@@ -1,5 +1,9 @@
 # CodexStatusbar
 
+> 本地修复版 **1.0.0-rc3.usage-fix1** 调整了统计来源、响应计时及半行日志读取。
+> 指标定义以[修复说明](docs/usage-timing-fix.md)为准，替代下文原版的对应说明。
+> 下方链接中的上游发布程序不包含此本地修复。
+
 **简体中文** · [English](README.md)
 
 ![CodexStatusbar 停靠在 Codex 输入框底栏、Context 指示器左侧](docs/images/docked-strip.png)

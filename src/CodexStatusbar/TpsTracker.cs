@@ -156,8 +156,8 @@ internal static class TpsRules
 /// characters and TPS is never fabricated: anything that cannot be computed stays <c>null</c> and
 /// renders as "--".
 ///
-///   turnTps  = 1000 * sum(official output_tokens for this turn) / sum(generation_ms for this turn)
-///   liveTps  = the same ratio over the turn currently in flight
+///   turnTps  = matched response tokens / matched response seconds
+///   liveTps  = an EMA of completed, timed response rates
 ///   heldTps  = the last measured value while that turn is still generating (shown with "~")
 ///   lastTurn = the final value, retained after the turn completes instead of resetting to "--"
 /// </summary>
@@ -166,10 +166,8 @@ internal sealed class TpsTracker
     private readonly HashSet<string> _seenResponseKeys = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Raw model-output windows as they were observed, in arrival order. Reasoning and AgentMessage
-    /// can interleave or overlap, so these are UNIONED (see <see cref="MergedModelElapsedMs"/>)
-    /// rather than summed: two items covering [0 s,5 s] and [4 s,10 s] are 10 s of model activity,
-    /// not 5 s + 6 s = 11 s.
+    /// Observed item windows plus spans closed by modern response records. Unioning prevents
+    /// the closing span from counting the same reasoning/message time twice.
     /// </summary>
     private readonly List<(long Start, long End)> _rawIntervals = [];
 
@@ -177,37 +175,37 @@ internal sealed class TpsTracker
 
     private bool _intervalsDirty;
 
-    // Turn identity and denominator (model-output time only).
+    // Turn identity and observed timing.
     private string? _turnId;
     private long? _firstItemStartMs;
     private long? _lastItemEndMs;
     private bool _turnItemsComplete;
 
-    // Numerator. Three official carriers are tracked independently. The two exact ones
-    // (turn_token_usage and the thread-cumulative delta) are combined with max; the per-response
-    // sum is only used when neither exact carrier is available, so repeat events can never inflate it.
-    private long _turnOutputFromTurnUsage;
-    private long _turnOutputFromThreadDelta;
     private long _turnOutputFromResponses;
-    private long _threadOutputAtTurnStart;
-    private bool _hasThreadOutputBaseline;
+    private long? _responseStartMs;
+    private long? _responseEndMs;
+    private long? _lastResponseCompletedAtMs;
+    private bool _responseHasToolCall;
+    private bool _lastResponseUntimed;
+
+    public long MeasuredOutputTokens { get; private set; }
+    public long MeasuredGenerationMs { get; private set; }
+    public int UntimedResponses { get; private set; }
 
     // Smoothing.
     private double? _ema;
-    private long _lastFoldGenerationMs = -1;
-    private long _lastFoldOutputTokens = -1;
+    private long _lastFoldGenerationMs;
 
     public string? TurnId => _turnId;
 
     public bool Streaming { get; private set; }
 
-    /// <summary>Union of this turn's Reasoning + AgentMessage windows, in milliseconds.</summary>
-    public long TurnGenerationMs => MergedModelElapsedMs;
+    /// <summary>Duration covered by matched response samples in this turn.</summary>
+    public long TurnGenerationMs => MeasuredGenerationMs;
 
     /// <summary>
-    /// Model activity time of the current turn: the merged (unioned) length of every
-    /// Reasoning/AgentMessage window. Overlaps are counted once. Tool, IO and user time are
-    /// not represented at all because those items are never recorded here.
+    /// Union of observed model windows. Only matched responses contribute to
+    /// <see cref="MeasuredGenerationMs"/>, the denominator used for the final average.
     /// </summary>
     public long MergedModelElapsedMs
     {
@@ -277,34 +275,22 @@ internal sealed class TpsTracker
     public int SampleCount { get; private set; }
 
     /// <summary>
-    /// True when the whole turn was observed from its <c>task_started</c> record. When false the
-    /// denominator is only a lower bound (the tail window began mid-turn), so TPS stays unknown:
-    /// "--" is correct there, 0 would be a lie.
+    /// Whether task_started was observed. Mid-turn tail recovery leaves TPS unknown because the
+    /// first visible item's timing may belong to a partially observed response.
     /// </summary>
     public bool TurnItemsComplete => _turnItemsComplete;
 
     /// <summary>
-    /// Official per-turn output tokens; 0 while the numerator is still unknown.
-    ///
-    /// The two exact, independent carriers — the sum of per-response <c>usage.output_tokens</c> and
-    /// the thread-cumulative delta — are combined with max, which guards against a lagging baseline.
-    /// <c>turn_token_usage</c> is only a last-resort fallback: some Codex builds write the
-    /// <i>thread</i> total there rather than the turn total, so it must never win a max().
+    /// Output from observed responses of the selected carrier, including responses without timing.
+    /// Conversation totals and their baselines never enter the TPS numerator.
     /// </summary>
-    public long TurnOutputTokens
-    {
-        get
-        {
-            var exact = Math.Max(_turnOutputFromResponses, _turnOutputFromThreadDelta);
-            return exact > 0 ? exact : _turnOutputFromTurnUsage;
-        }
-    }
+    public long TurnOutputTokens => _turnOutputFromResponses;
 
     /// <summary>
     /// Begins (or restarts) a turn. <paramref name="itemsComplete"/> is true only when the caller saw
     /// this turn's <c>task_started</c> record, which is what makes the denominator trustworthy.
     /// </summary>
-    public void BeginTurn(string? turnId, bool itemsComplete, long threadCumulativeOutputTokens, bool hasCumulative)
+    public void BeginTurn(string? turnId, bool itemsComplete)
     {
         if (string.Equals(_turnId, turnId, StringComparison.Ordinal) && _turnItemsComplete == itemsComplete)
         {
@@ -316,14 +302,19 @@ internal sealed class TpsTracker
         ClearIntervals();
         _firstItemStartMs = null;
         _lastItemEndMs = null;
-        _turnOutputFromTurnUsage = 0;
         _turnOutputFromResponses = 0;
         _seenResponseKeys.Clear();
-        _threadOutputAtTurnStart = threadCumulativeOutputTokens;
-        _hasThreadOutputBaseline = hasCumulative;
-        _turnOutputFromThreadDelta = 0;
-        _lastFoldGenerationMs = -1;
-        _lastFoldOutputTokens = -1;
+        _lastFoldGenerationMs = 0;
+        _responseStartMs = null;
+        _responseEndMs = null;
+        _lastResponseCompletedAtMs = null;
+        _responseHasToolCall = false;
+        _lastResponseUntimed = false;
+        MeasuredOutputTokens = 0;
+        MeasuredGenerationMs = 0;
+        UntimedResponses = 0;
+        SampleCount = 0;
+        RawLastSample = null;
         _activityAfterMeasurement = false;
 
         // The EMA is reseeded every turn. That keeps smoothing to well under three samples of
@@ -350,10 +341,19 @@ internal sealed class TpsTracker
     /// </summary>
     public void ObserveModelOutputItem(long startedAtMs, long completedAtMs)
     {
+        // Late items from an already-accounted response cannot time the next response.
+        if (_lastResponseCompletedAtMs is long boundary && startedAtMs < boundary)
+        {
+            return;
+        }
+
         var duration = TpsRules.NormalizeItemDuration(startedAtMs, completedAtMs);
         if (duration > 0)
         {
             AddInterval(startedAtMs, startedAtMs + duration);
+            _responseStartMs = Math.Min(_responseStartMs ?? startedAtMs, startedAtMs);
+            _responseEndMs = Math.Max(_responseEndMs ?? completedAtMs, completedAtMs);
+            _activityAfterMeasurement = true;
         }
 
         if (startedAtMs > 0 && (_firstItemStartMs is null || startedAtMs < _firstItemStartMs))
@@ -443,82 +443,78 @@ internal sealed class TpsTracker
         _intervalsDirty = false;
     }
 
-    /// <summary>Official per-turn output total from <c>turn_token_usage.output_tokens</c>.</summary>
-    public void ObserveTurnUsageOutput(long turnOutputTokens) =>
-        _turnOutputFromTurnUsage = Math.Max(_turnOutputFromTurnUsage, turnOutputTokens);
+    public void NoteToolCall() => _responseHasToolCall = true;
 
-    /// <summary>
-    /// Official cumulative thread output tokens. Used to derive the in-flight turn's output as a
-    /// delta, which is exact and needs no deduplication — this is the path that keeps older Codex
-    /// sessions (no token_usage_record at all) correct.
-    /// </summary>
-    public void ObserveThreadCumulativeOutput(long threadOutputTokens, bool hasCumulative)
+    /// <summary>Discard provisional legacy samples when the authoritative carrier first appears.</summary>
+    public void SwitchUsageSource()
     {
-        if (!hasCumulative)
-        {
-            return;
-        }
-
-        if (!_hasThreadOutputBaseline)
-        {
-            _threadOutputAtTurnStart = threadOutputTokens;
-            _hasThreadOutputBaseline = true;
-        }
-
-        _turnOutputFromThreadDelta = Math.Max(0, threadOutputTokens - _threadOutputAtTurnStart);
+        _seenResponseKeys.Clear();
+        _turnOutputFromResponses = 0;
+        MeasuredOutputTokens = 0;
+        MeasuredGenerationMs = 0;
+        UntimedResponses = 0;
+        SampleCount = 0;
+        RawLastSample = null;
+        SmoothedTps = null;
+        LastTurnTps = null;
+        _ema = null;
     }
 
     /// <summary>
-    /// Per-response official output, deduplicated by response identity. Used only when neither exact
-    /// carrier exists, so a repeated token_count event cannot double count.
+    /// Commit one complete response. Item arrivals alone never change a measured rate.
+    /// Modern timestamps close the model span before tool execution; legacy tool calls without
+    /// this boundary are untimed rather than divided by a partial reasoning interval.
     /// </summary>
-    public void ObserveResponseOutput(string responseKey, long outputTokens)
+    public void ObserveResponseOutput(string responseKey, long outputTokens, long? completedAtMs = null)
     {
-        if (outputTokens <= 0)
-        {
-            return;
-        }
-
         if (!_seenResponseKeys.Add(responseKey))
         {
             DuplicateResponseSamplesIgnored++;
             return;
         }
 
-        _turnOutputFromResponses += outputTokens;
-    }
+        _turnOutputFromResponses += Math.Max(0, outputTokens);
+        var hasTiming = _responseStartMs.HasValue;
+        if (completedAtMs is long end && _responseStartMs is long start)
+        {
+            if (end >= _responseEndMs && TpsRules.NormalizeItemDuration(start, end) > 0)
+            {
+                AddInterval(start, end);
+                _lastResponseCompletedAtMs = end;
+            }
+            else
+            {
+                hasTiming = false;
+            }
+        }
+        else if (_responseHasToolCall)
+        {
+            hasTiming = false;
+        }
+        if (completedAtMs is long completed)
+        {
+            _lastResponseCompletedAtMs = Math.Max(_lastResponseCompletedAtMs ?? completed, completed);
+        }
 
-    /// <summary>Per-response samples dropped because the same response was reported again.</summary>
-    public int DuplicateResponseSamplesIgnored { get; private set; }
-
-    /// <summary>Folds a fresh measurement into the EMA when either side of the ratio advanced.</summary>
-    public void RefreshMeasurement()
-    {
         var elapsed = MergedModelElapsedMs;
-        if (!_turnItemsComplete || elapsed <= 0)
-        {
-            return;
-        }
-
-        var output = TurnOutputTokens;
-        if (output <= 0)
-        {
-            return;
-        }
-
-        if (elapsed == _lastFoldGenerationMs && output == _lastFoldOutputTokens)
-        {
-            return;
-        }
-
-        var sample = 1000d * output / elapsed;
-        if (!MetricFormat.IsUsableTps(sample) || sample > TpsRules.ImplausibleTps)
-        {
-            return;
-        }
-
+        var responseMs = elapsed - _lastFoldGenerationMs;
         _lastFoldGenerationMs = elapsed;
-        _lastFoldOutputTokens = output;
+        _responseStartMs = null;
+        _responseEndMs = null;
+        _responseHasToolCall = false;
+        var sample = responseMs > 0 ? 1000d * outputTokens / responseMs : 0;
+        if (!_turnItemsComplete || !hasTiming || !MetricFormat.IsUsableTps(sample)
+            || sample > TpsRules.ImplausibleTps)
+        {
+            UntimedResponses++;
+            _lastResponseUntimed = true;
+            _activityAfterMeasurement = true;
+            return;
+        }
+
+        MeasuredOutputTokens += outputTokens;
+        MeasuredGenerationMs += responseMs;
+        _lastResponseUntimed = false;
         _activityAfterMeasurement = false;
         RawLastSample = sample;
         SampleCount++;
@@ -528,10 +524,12 @@ internal sealed class TpsTracker
         SmoothedTps = MetricFormat.IsUsableTps(_ema) ? _ema : null;
     }
 
+    /// <summary>Per-response samples dropped because the same response was reported again.</summary>
+    public int DuplicateResponseSamplesIgnored { get; private set; }
+
     /// <summary>Finalises a turn and retains its average as <see cref="LastTurnTps"/>.</summary>
     public void CompleteTurn(long? durationMs, long? ttftMs)
     {
-        RefreshMeasurement();
         if (durationMs is > 0)
         {
             LastTurnDurationMs = durationMs;
@@ -543,7 +541,10 @@ internal sealed class TpsTracker
         }
 
         Streaming = false;
-        LastTurnTps = SmoothedTps;
+        LastTurnTps = MeasuredGenerationMs > 0
+            ? 1000d * MeasuredOutputTokens / MeasuredGenerationMs
+            : null;
+        SmoothedTps = LastTurnTps;
     }
 
     /// <summary>Aborts a turn (turn_aborted) without inventing a final average.</summary>
@@ -565,14 +566,17 @@ internal sealed class TpsTracker
         ClearIntervals();
         _firstItemStartMs = null;
         _lastItemEndMs = null;
-        _turnOutputFromTurnUsage = 0;
-        _turnOutputFromThreadDelta = 0;
         _turnOutputFromResponses = 0;
         _seenResponseKeys.Clear();
-        _threadOutputAtTurnStart = 0;
-        _hasThreadOutputBaseline = false;
-        _lastFoldGenerationMs = -1;
-        _lastFoldOutputTokens = -1;
+        _lastFoldGenerationMs = 0;
+        _responseStartMs = null;
+        _responseEndMs = null;
+        _lastResponseCompletedAtMs = null;
+        _responseHasToolCall = false;
+        _lastResponseUntimed = false;
+        MeasuredOutputTokens = 0;
+        MeasuredGenerationMs = 0;
+        UntimedResponses = 0;
         _activityAfterMeasurement = false;
         _ema = null;
         SmoothedTps = null;
@@ -598,17 +602,16 @@ internal sealed class TpsTracker
     /// the last sample, or tool / IO work completed after it, so generation has moved on.
     /// </summary>
     public bool IsHeld =>
-        Streaming
-        && SmoothedTps is not null
-        && (_activityAfterMeasurement || MergedModelElapsedMs > _lastFoldGenerationMs);
+        SmoothedTps is not null
+        && (_lastResponseUntimed || (!Streaming && (UntimedResponses > 0 || _responseStartMs is not null)) || (Streaming
+            && (_activityAfterMeasurement || MergedModelElapsedMs > _lastFoldGenerationMs)));
 
     private bool _activityAfterMeasurement;
 }
 
 /// <summary>
-/// Everything recovered from one rollout file. Cumulative usage comes from whichever carrier is
-/// newest in file order: <c>token_usage_record.payload.thread_token_usage</c> (Codex 0.159+) or
-/// <c>event_msg/token_count.payload.info.total_token_usage</c> (the only carrier on 0.151).
+/// Everything recovered from one rollout file. Prefer token_usage_record; token_count is a
+/// legacy fallback whose cumulative scope can differ from the thread-wide modern carrier.
 /// </summary>
 internal sealed class RolloutStreamState
 {
@@ -627,8 +630,10 @@ internal sealed class RolloutStreamState
     private static readonly HashSet<string> KnownItemTypes = new(StringComparer.Ordinal)
     {
         "UserMessage", "Reasoning", "AgentMessage", "CommandExecution",
-        "FileChange", "McpToolCall", "WebSearch", "ImageView"
+        "FileChange", "McpToolCall", "WebSearch", "ImageView", "ContextCompaction"
     };
+
+    private bool _hasModernUsage;
 
     public TpsTracker Tps { get; } = new();
 
@@ -671,7 +676,7 @@ internal sealed class RolloutStreamState
     /// <summary>
     /// Which official carrier supplied the cumulative usage:
     /// <c>token_usage_record</c> (Codex 0.159+), <c>token_count</c> (the only carrier on 0.151),
-    /// both, or <c>none</c>.
+    /// or <c>none</c>. The two cumulative scopes are never mixed.
     /// </summary>
     public string Carrier { get; private set; } = "none";
 
@@ -721,7 +726,15 @@ internal sealed class RolloutStreamState
                     ObserveEventMessage(root);
                     break;
                 case "turn_context":
+                    break;
                 case "response_item":
+                    if (root.TryGetProperty("payload", out var responseItem)
+                        && responseItem.ValueKind == JsonValueKind.Object
+                        && GetString(responseItem, "type") is "function_call" or "custom_tool_call")
+                    {
+                        Tps.NoteToolCall();
+                    }
+                    break;
                 case "world_state":
                 case "compacted":
                     break;
@@ -794,12 +807,16 @@ internal sealed class RolloutStreamState
     {
         var turnId = GetString(payload, "turn_id");
         CurrentTurnId = turnId;
-        Tps.BeginTurn(turnId, itemsComplete: true, OutputTokens, HasCumulativeUsage);
+        Tps.BeginTurn(turnId, itemsComplete: true);
     }
 
     private void ObserveTaskComplete(JsonElement payload)
     {
         var turnId = GetString(payload, "turn_id");
+        if (IsOtherActiveTurn(turnId))
+        {
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(turnId))
         {
             CurrentTurnId = turnId;
@@ -816,11 +833,14 @@ internal sealed class RolloutStreamState
             return;
         }
 
-        if (info.TryGetProperty("total_token_usage", out var total) && total.ValueKind == JsonValueKind.Object)
+        var hasTotal = info.TryGetProperty("total_token_usage", out var total)
+            && total.ValueKind == JsonValueKind.Object;
+        if (!_hasModernUsage && hasTotal)
         {
-            // Cumulative for the whole thread. Redundant with token_usage_record on 0.159 and the
-            // only carrier on older Codex, so "last one wins in file order" is right for both.
-            ApplyCumulativeUsage(total, "token_count");
+            if (!ApplyCumulativeUsage(total, "token_count"))
+            {
+                return;
+            }
         }
 
         if (TryGetLong(info, "model_context_window") is long window && window > 0)
@@ -830,20 +850,20 @@ internal sealed class RolloutStreamState
 
         if (info.TryGetProperty("last_token_usage", out var last) && last.ValueKind == JsonValueKind.Object)
         {
+            if (_hasModernUsage)
+            {
+                // This may arrive after tools finish, long after the modern response record.
+                return;
+            }
             ContextUsedTokens = ReadRequestSize(last);
 
             var lastOutput = GetLong(last, "output_tokens");
             if (lastOutput > 0)
             {
-                // Older Codex (0.151) has no token_usage_record, so the per-response official count
-                // exists only here. The dedup key is derived from the VALUES rather than from the
-                // carrier: 0.159 emits both carriers with byte-identical usage for one response, so a
-                // carrier-specific key would count every response twice (measured: exactly 2x).
-                Tps.ObserveResponseOutput(ResponseSampleKey(last), lastOutput);
+                // A cumulative snapshot distinguishes equal-sized consecutive responses.
+                Tps.ObserveResponseOutput(ResponseSampleKey(hasTotal ? total : last), lastOutput);
             }
         }
-
-        Tps.RefreshMeasurement();
     }
 
     private void ObserveTokenUsageRecord(JsonElement root)
@@ -854,57 +874,63 @@ internal sealed class RolloutStreamState
         }
 
         var turnId = GetString(payload, "turn_id");
+        if (IsOtherActiveTurn(turnId))
+        {
+            // A delayed record from another turn must not replace the active turn's timing.
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(turnId))
         {
             if (!string.Equals(CurrentTurnId, turnId, StringComparison.Ordinal))
             {
                 // A turn whose task_started we never saw: mark it incomplete so its TPS stays unknown.
                 CurrentTurnId = turnId;
-                Tps.BeginTurn(turnId, itemsComplete: false, OutputTokens, HasCumulativeUsage);
+                Tps.BeginTurn(turnId, itemsComplete: false);
             }
             else if (Tps.TurnId is null)
             {
-                Tps.BeginTurn(turnId, itemsComplete: false, OutputTokens, HasCumulativeUsage);
+                Tps.BeginTurn(turnId, itemsComplete: false);
             }
         }
 
         if (payload.TryGetProperty("thread_token_usage", out var threadUsage)
             && threadUsage.ValueKind == JsonValueKind.Object)
         {
-            ApplyCumulativeUsage(threadUsage, "token_usage_record");
-        }
-
-        if (payload.TryGetProperty("turn_token_usage", out var turnUsage)
-            && turnUsage.ValueKind == JsonValueKind.Object
-            && payload.TryGetProperty("thread_token_usage", out var threadForCompare)
-            && threadForCompare.ValueKind == JsonValueKind.Object
-            && !UsageEquals(turnUsage, threadForCompare))
-        {
-            // Genuinely turn-scoped: use it, because it survives a tail window that missed this
-            // turn's earlier responses. Measured on Codex 26.928.3736.0 (core 0.159.2), however,
-            // turn_token_usage is a byte-identical COPY of thread_token_usage for every record —
-            // treating it as a per-turn value would put the whole conversation's output in the
-            // numerator. Hence the equality guard: only a genuinely different value is trusted.
-            Tps.ObserveTurnUsageOutput(GetLong(turnUsage, "output_tokens"));
+            if (!_hasModernUsage)
+            {
+                Tps.SwitchUsageSource();
+                _hasModernUsage = true;
+            }
+            if (!ApplyCumulativeUsage(threadUsage, "token_usage_record"))
+            {
+                return;
+            }
         }
 
         if (payload.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
         {
             // "Context used" is the size of the current request, never the conversation total.
             ContextUsedTokens = ReadRequestSize(usage);
-            Tps.ObserveResponseOutput(ResponseSampleKey(usage), GetLong(usage, "output_tokens"));
+            var responseKey = GetString(payload, "response_id")
+                ?? ResponseSampleKey(threadUsage.ValueKind == JsonValueKind.Object ? threadUsage : usage);
+            var completedAt = DateTimeOffset.TryParse(GetString(root, "timestamp"),
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var timestamp)
+                ? (long?)timestamp.ToUnixTimeMilliseconds() : null;
+            Tps.ObserveResponseOutput(responseKey, GetLong(usage, "output_tokens"), completedAt);
         }
-
-        Tps.RefreshMeasurement();
     }
 
     private void ObserveItemCompleted(JsonElement payload)
     {
         var turnId = GetString(payload, "turn_id");
+        if (IsOtherActiveTurn(turnId))
+        {
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(turnId) && !string.Equals(CurrentTurnId, turnId, StringComparison.Ordinal))
         {
             CurrentTurnId = turnId;
-            Tps.BeginTurn(turnId, itemsComplete: false, OutputTokens, HasCumulativeUsage);
+            Tps.BeginTurn(turnId, itemsComplete: false);
         }
 
         var itemType = payload.TryGetProperty("item", out var item) && item.ValueKind == JsonValueKind.Object
@@ -932,40 +958,41 @@ internal sealed class RolloutStreamState
         Tps.ObserveModelOutputItem(
             TryGetLong(payload, "started_at_ms") ?? 0,
             TryGetLong(payload, "completed_at_ms") ?? 0);
-        Tps.RefreshMeasurement();
     }
 
-    private void ApplyCumulativeUsage(JsonElement usage, string carrier)
+    private bool IsOtherActiveTurn(string? turnId) =>
+        !string.IsNullOrWhiteSpace(turnId) && CurrentTurnId is not null
+        && turnId != CurrentTurnId && Tps.Streaming && Tps.TurnItemsComplete;
+
+    private bool ApplyCumulativeUsage(JsonElement usage, string carrier)
     {
         var total = GetLong(usage, "total_tokens");
         var input = GetLong(usage, "input_tokens");
         var output = GetLong(usage, "output_tokens");
         if (total <= 0 && input <= 0 && output <= 0)
         {
-            return;
+            return false;
         }
 
         var cached = GetLong(usage, "cached_input_tokens");
 
-        // Every carrier here is CUMULATIVE, so the newest reading simply replaces the previous one.
-        // Nothing is ever added, which is what makes a duplicate reading harmless — but it is
-        // counted and reported so a future Codex change that starts emitting deltas is visible
-        // instead of silently corrupting the totals.
+        // Do not mix scopes or let a delayed snapshot rewind the selected source.
+        if (HasRolloutUsage && Carrier == carrier
+            && (total < TotalTokens || input < InputTokens || output < OutputTokens))
+        {
+            Warnings.Add("stale-usage:" + carrier);
+            return false;
+        }
         if (HasCumulativeUsage && total == TotalTokens && input == InputTokens
             && cached == CachedInputTokens && output == OutputTokens)
         {
             DuplicateUsageReadingsIgnored++;
-            return;
+            Carrier = carrier;
+            HasRolloutUsage = true;
+            return true;
         }
 
-        if (Carrier == "none")
-        {
-            Carrier = carrier;
-        }
-        else if (Carrier != carrier)
-        {
-            Carrier = "token_usage_record+token_count";
-        }
+        Carrier = carrier;
 
         TotalTokens = total;
         InputTokens = input;
@@ -974,7 +1001,7 @@ internal sealed class RolloutStreamState
         ReasoningOutputTokens = GetLong(usage, "reasoning_output_tokens");
         HasCumulativeUsage = true;
         HasRolloutUsage = true;
-        Tps.ObserveThreadCumulativeOutput(output, hasCumulative: true);
+        return true;
     }
 
     /// <summary>Applies a baseline recovered from state_5.sqlite when the rollout tail had nothing.</summary>
@@ -1009,21 +1036,12 @@ internal sealed class RolloutStreamState
     }
 
     /// <summary>
-    /// Carrier-independent identity of one official model response, built from its own usage values.
-    /// Both carriers report identical values for a response, and repeated events repeat them too, so
-    /// this key makes the per-response numerator immune to double counting.
+    /// Fallback identity for logs without response_id: the selected carrier's cumulative snapshot.
     /// </summary>
     private static string ResponseSampleKey(JsonElement usage) => string.Create(
         CultureInfo.InvariantCulture,
         $"{GetLong(usage, "input_tokens")}:{GetLong(usage, "cached_input_tokens")}:"
         + $"{GetLong(usage, "output_tokens")}:{GetLong(usage, "total_tokens")}");
-
-    /// <summary>True when two usage objects carry the same official counts.</summary>
-    private static bool UsageEquals(JsonElement left, JsonElement right) =>
-        GetLong(left, "input_tokens") == GetLong(right, "input_tokens")
-        && GetLong(left, "cached_input_tokens") == GetLong(right, "cached_input_tokens")
-        && GetLong(left, "output_tokens") == GetLong(right, "output_tokens")
-        && GetLong(left, "total_tokens") == GetLong(right, "total_tokens");
 
     private static string? GetString(JsonElement element, string propertyName) =>
         element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String

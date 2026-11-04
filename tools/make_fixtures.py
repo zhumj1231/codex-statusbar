@@ -175,7 +175,10 @@ def build_modern():
     lines.append(task_complete(TURN_B, 12_000, 900))
     for i, ln in enumerate(lines):
         ln.setdefault("ordinal", i)
-        ln.setdefault("timestamp", f"2026-09-30T15:00:{i:02d}.000Z")
+        # Item windows use a relative clock. Leave response boundaries absent so this fixture
+        # exercises legacy interval timing rather than combining relative and Unix timestamps.
+        if ln["type"] != "token_usage_record":
+            ln.setdefault("timestamp", f"2026-09-30T15:00:{i:02d}.000Z")
     return lines
 
 

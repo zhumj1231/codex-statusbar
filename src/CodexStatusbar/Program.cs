@@ -240,8 +240,8 @@ internal static class SessionPathResolver
 }
 
 /// <summary>
-/// One immutable view of the active conversation. Every numeric member is official Codex data;
-/// nothing is estimated. Optional members default so existing probe JSON keeps deserialising.
+/// One immutable view of the active conversation. Counts are official; TPS is a response-level
+/// estimate from logged timing. Optional members preserve existing probe JSON compatibility.
 /// </summary>
 internal sealed record TokenSnapshot(
     string ThreadId,
@@ -275,7 +275,10 @@ internal sealed record TokenSnapshot(
     long MergedModelElapsedMs = 0,
     IReadOnlyList<string>? ModelIntervals = null,
     string Carrier = "none",
-    int DedupIgnored = 0)
+    int DedupIgnored = 0,
+    long MeasuredOutputTokens = 0,
+    long MeasuredGenerationMs = 0,
+    int UntimedResponses = 0)
 {
     public double? CacheHitPercent => MetricFormat.CacheHitPercent(InputTokens, CachedInputTokens);
 
@@ -1188,7 +1191,10 @@ internal sealed class TokenLogMonitor : IDisposable
             tracker?.MergedModelElapsedMs ?? 0,
             intervals,
             state?.Carrier ?? "none",
-            dedupIgnored);
+            dedupIgnored,
+            tracker?.MeasuredOutputTokens ?? 0,
+            tracker?.MeasuredGenerationMs ?? 0,
+            tracker?.UntimedResponses ?? 0);
         return _lastSnapshot;
     }
 

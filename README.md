@@ -1,5 +1,9 @@
 # CodexStatusbar
 
+> Local build **1.0.0-rc3.usage-fix1** changes usage-source selection, response timing and partial-line
+> reading. Its metric definitions supersede sections 1–2 below; see [the fix notes](docs/usage-timing-fix.md).
+> The upstream release binary linked below does not contain this local fix.
+
 <https://github.com/dongyue-19/codex-statusbar> · MIT licensed · **v1.0.0-rc3** (release candidate,
 feature-frozen)
 
