@@ -5,26 +5,26 @@
 请在这台 Windows 笔记本上安装下面指定的 CodexStatusbar 修复版，并启用当前用户登录后自启动。先检查本机环境和已有安装，再完成构建、自检、安装与运行验证。不要改动或重启 Codex，不要修改 Codex 的启动快捷方式，也不要让 Codex 等待状态条启动成功。此任务已包含安装和自启动授权。
 
 - 仓库：https://github.com/zhumj1231/codex-statusbar
-- 分支：`codex/fix_usage_timing`
+- 分支：`codex/fix_statusbar_overlap`
 - 必须包含的修复提交：`2711df23d5cabd357716fc38738c6858eeb07952`
-- 预期产品版本：`1.0.0-rc3.usage-fix1`
+- 预期产品版本：`1.0.0-rc3.usage-fix2`
 - 修复原理：[usage-timing-fix.md](usage-timing-fix.md)
 
 优先下载本 fork 的修复版 Release，不必编译；源码构建仅作为备用。不能使用上游旧版 Release 的 EXE。不要复制另一台机器的会话日志、账号配置或整个 `.codex` 目录。
 
 ## 直接下载（推荐，无需 SDK）
 
-- [Release 页面](https://github.com/zhumj1231/codex-statusbar/releases/tag/v1.0.0-rc3.usage-fix1)
-- [CodexStatusbar.exe](https://github.com/zhumj1231/codex-statusbar/releases/download/v1.0.0-rc3.usage-fix1/CodexStatusbar.exe)
-- [SHA256SUMS.txt](https://github.com/zhumj1231/codex-statusbar/releases/download/v1.0.0-rc3.usage-fix1/SHA256SUMS.txt)
+- [Release 页面](https://github.com/zhumj1231/codex-statusbar/releases/tag/v1.0.0-rc3.usage-fix2)
+- [CodexStatusbar.exe](https://github.com/zhumj1231/codex-statusbar/releases/download/v1.0.0-rc3.usage-fix2/CodexStatusbar.exe)
+- [SHA256SUMS.txt](https://github.com/zhumj1231/codex-statusbar/releases/download/v1.0.0-rc3.usage-fix2/SHA256SUMS.txt)
 
 这是 Windows x64 自包含版，不需要 .NET SDK 或 Runtime。下载 EXE 后执行 `Get-FileHash -LiteralPath <下载文件完整路径> -Algorithm SHA256`，应为：
 
 ```text
-D2FC8D5F4D4852F8FB7ABE236628A9A1190BD28556EB6BF69DF5BA069320EDB1
+CB8327CAE6B0E38EC14390B293DD2903A48FACCEB000071902CDDE3CBDB61AA3
 ```
 
-此文件与来源电脑已安装并通过 342 项自检的 EXE 完全相同，源码修复提交为上面指定的 `2711df2`。核对通过后直接执行下文“安装与自启动”：以下载的 EXE 代替 `dist\CodexStatusbar.exe`，无需执行源码克隆和构建。笔记本仍需验证实际运行、自启动和状态条显示。
+此文件与来源电脑已安装并通过 353 项自检的 EXE 完全相同，包含上面指定的统计修复 `2711df2` 及本分支的布局修复；定位行为见 [layout-fix.md](layout-fix.md)。核对通过后直接执行下文“安装与自启动”：以下载的 EXE 代替 `dist\CodexStatusbar.exe`，无需执行源码克隆和构建。笔记本仍需验证实际运行、自启动和状态条显示。
 
 ## 环境与源码（仅自行构建时需要）
 
@@ -33,7 +33,7 @@ D2FC8D5F4D4852F8FB7ABE236628A9A1190BD28556EB6BF69DF5BA069320EDB1
 优先使用现有 Git 和 .NET 10 SDK。若缺少 SDK，从 Microsoft 官方渠道安装，或下载官方便携 SDK 并核对发布的校验值；便携安装不需要改系统 PATH。不要使用这台交接来源电脑的绝对路径。选择本机合适且尚不存在的源码目录；如已有克隆，先检查远程和未提交内容，保留已有工作。
 
 ```powershell
-git clone --branch codex/fix_usage_timing --single-branch https://github.com/zhumj1231/codex-statusbar.git codex-statusbar
+git clone --branch codex/fix_statusbar_overlap --single-branch https://github.com/zhumj1231/codex-statusbar.git codex-statusbar
 if ($LASTEXITCODE -ne 0) { throw 'clone failed' }
 Set-Location codex-statusbar
 git merge-base --is-ancestor 2711df23d5cabd357716fc38738c6858eeb07952 HEAD
@@ -61,7 +61,7 @@ Get-Content -LiteralPath $testLog -Tail 6
 Get-FileHash -LiteralPath $builtExe -Algorithm SHA256
 ```
 
-本修复提交在来源电脑通过 **342 checks / 0 failures**。笔记本需要实际执行并记录自己的结果，不能把来源电脑的结果当成本机验证。不同 SDK/构建环境可能产生不同的 EXE 哈希；记录本机构建值，并在复制安装后比较两者，不要拿来源电脑哈希硬性判断重构建结果。
+本修复提交在来源电脑通过 **353 checks / 0 failures**。笔记本需要实际执行并记录自己的结果，不能把来源电脑的结果当成本机验证。不同 SDK/构建环境可能产生不同的 EXE 哈希；记录本机构建值，并在复制安装后比较两者，不要拿来源电脑哈希硬性判断重构建结果。
 
 ## 安装与自启动
 

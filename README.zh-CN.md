@@ -1,8 +1,8 @@
 # CodexStatusbar
 
-> 本地修复版 **1.0.0-rc3.usage-fix1** 调整了统计来源、响应计时及半行日志读取。
-> 指标定义以[修复说明](docs/usage-timing-fix.md)为准，替代下文原版的对应说明。
-> 下方链接中的上游发布程序不包含此本地修复。
+> Fork 修复版 **1.0.0-rc3.usage-fix2** 包含[统计与测速修复](docs/usage-timing-fix.md)，
+> 新增[防重叠定位并去掉闪电符号](docs/layout-fix.md)。相关行为以修复说明为准，替代下文原版说明。
+> [下载与安装交接](docs/laptop-install-handoff.zh-CN.md)。
 
 **简体中文** · [English](README.md)
 

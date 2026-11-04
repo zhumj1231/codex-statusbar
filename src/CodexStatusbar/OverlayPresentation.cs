@@ -43,7 +43,7 @@ internal static class OverlayPresentationBuilder
     private const string Separator = " · ";
 
     /// <summary>The collapsed strip before any conversation is known.</summary>
-    public const string WaitingCapsuleText = "⚡ -- tok/s · -- tok · Cache --";
+    public const string WaitingCapsuleText = "-- tok/s · -- tok · Cache --";
 
     /// <summary>
     /// The strip's verbosity ladder, widest first. Level 0 is what the user sees at normal widths —
@@ -61,12 +61,12 @@ internal static class OverlayPresentationBuilder
         return
         [
             // 0 — full
-            $"⚡ {tps} tok/s{Separator}{tokens} tok{Separator}Cache {cacheText}",
+            $"{tps} tok/s{Separator}{tokens} tok{Separator}Cache {cacheText}",
 
             // 1 — drop the unit suffix from the token count and the "Cache" word
-            $"⚡ {tps} t/s{Separator}{tokens}{Separator}{cacheText}",
+            $"{tps} tok/s{Separator}{tokens}{Separator}{cacheText}",
 
-            // 2 — drop the lightning glyph too
+            // 2 — shorten the speed unit
             $"{tps} t/s{Separator}{tokens}{Separator}{cacheText}",
 
             // 3 — the two quantities that need no unit: total tokens and cache ratio
@@ -165,7 +165,7 @@ internal static class OverlayPresentationBuilder
 
     /// <summary>
     /// The collapsed strip at every verbosity, widest first, as one line each:
-    /// <c>⚡ 243 tok/s · 5.7M tok · Cache 98%</c>.
+    /// <c>243 tok/s · 5.7M tok · Cache 98%</c>.
     ///
     /// Total is rendered as <c>input + output</c> — the strict definition — not as the carrier's
     /// own <c>total_tokens</c> field, so what is displayed is literally the documented formula.
@@ -252,7 +252,7 @@ internal static class OverlayPresentationBuilder
             DisplayField.ContextPercent => ("上下文", "上下文占用"),
             DisplayField.Reasoning => ("推理", "推理输出"),
             DisplayField.Thread => ("会话", "会话"),
-            DisplayField.Tps => ("⚡", "估算输出速度"),
+            DisplayField.Tps => ("TPS", "估算输出速度"),
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "不支持的展示字段。")
         };
     }

@@ -74,7 +74,7 @@ internal sealed record OverlayLayoutResult(
 internal static class OverlayLayoutCalculator
 {
     // The collapsed strip carries three metrics on one line
-    // (⚡ 243 tok/s   ·   5.7M tok   ·   Cache 98%), so it needs more room than the two-field
+    // (243 tok/s   ·   5.7M tok   ·   Cache 98%), so it needs more room than the two-field
     // layouts this was forked from. OverlayPresentation.WaitingCapsuleText is the widest case.
     private const int CollapsedWidthDip = 330;
     private const int TitleBarCollapsedWidthDip = 330;
@@ -192,9 +192,13 @@ internal static class OverlayLayoutCalculator
                 dock.ComposerRect.Right - ScaleSystemDip(ComposerRightReserveDip, dpi),
             ComposerReferenceSource.Window =>
                 visibleHost.Right - ScaleSystemDip(WindowRightReserveDip, dpi),
-            _ => dock.ReferenceRect.Left
+            _ => dock.HasRow ? Math.Min(dock.ReferenceRect.Left, dock.RowRect.Left) : dock.ReferenceRect.Left
         };
     }
+
+    /// <summary>Shrink immediately; only defer expansion while the reference is moving.</summary>
+    public static int StabilizeVariant(int chosen, int previous, bool referenceMoved) =>
+        referenceMoved && chosen >= 0 && previous >= 0 && chosen < previous ? previous : chosen;
 
     /// <summary>The toolbar row's vertical centre, for whichever rung of the ladder produced <paramref name="dock"/>.</summary>
     public static int ResolveRowCenterY(ComposerDockSnapshot dock, IntRect visibleHost, uint dpi)
@@ -283,7 +287,7 @@ internal static class OverlayLayoutCalculator
         var dpi = host.Dpi == 0 ? 96u : host.Dpi;
         var scalePercent = ManualAttachmentRules.SanitizeScale(request.ScalePercent);
         var workingArea = host.WorkingArea;
-        if (workingArea.IsEmpty)
+        if (workingArea.IsEmpty || !dock.HasReference)
         {
             return Hidden(host.Dpi, ExpansionDirection.Down, scalePercent);
         }
@@ -318,13 +322,19 @@ internal static class OverlayLayoutCalculator
             // The strip would sit on top of the composer's own buttons. The responsive policy is
             // expected to have shortened it already; if it still does not fit, keep it out of the way
             // rather than printing text over the toolbar.
-            desired = desired with { X = leftLimit };
+            return Hidden(host.Dpi, ExpansionDirection.Down, scalePercent);
         }
 
         var capsuleScreen = ClampToVisible(
             desired,
             workingArea,
             ScaleSystemDip(ManualAttachmentRules.MinimumVisibleDip, dpi));
+
+        if (capsuleScreen.Left < leftLimit || capsuleScreen.Right > referenceLeft - gap
+            || capsuleScreen.Top != desired.Top)
+        {
+            return Hidden(host.Dpi, ExpansionDirection.Down, scalePercent);
+        }
 
         var collapsed = Collapsed(
             host.Dpi,
